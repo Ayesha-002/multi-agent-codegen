@@ -1,4 +1,4 @@
-version: '3.8'
+# Note: 'version' field is obsolete in modern Docker Compose, removed
 
 services:
   # Message Queue
@@ -6,8 +6,8 @@ services:
     image: rabbitmq:3.12-management-alpine
     container_name: codegen-rabbitmq
     ports:
-      - "5672:5672"      # AMQP
-      - "15672:15672"    # Management UI
+      - "5672:5672"
+      - "15672:15672"
     environment:
       RABBITMQ_DEFAULT_USER: codegen
       RABBITMQ_DEFAULT_PASS: ${RABBITMQ_PASSWORD:-devpassword}
@@ -74,7 +74,7 @@ services:
       - RABBITMQ_URL=amqp://codegen:${RABBITMQ_PASSWORD:-devpassword}@rabbitmq:5672/
       - REDIS_URL=redis://:${REDIS_PASSWORD:-devpassword}@redis:6379/0
       - OLLAMA_HOST=http://host.docker.internal:11434
-      - MODEL_NAME=deepseek-coder:33b-instruct-q4_K_M
+      - MODEL_NAME=deepseek-coder:6.7b-instruct-q4_K_M
     depends_on:
       - rabbitmq
       - redis
@@ -86,8 +86,8 @@ services:
     deploy:
       resources:
         limits:
-          cpus: '2'
-          memory: 3G
+          cpus: '1.5'
+          memory: 1536M
 
   # Verifier Agent
   agent-verifier:
@@ -110,8 +110,8 @@ services:
     deploy:
       resources:
         limits:
-          cpus: '1'
-          memory: 1G
+          cpus: '0.5'
+          memory: 512M
 
   # Tester Agent
   agent-tester:
@@ -123,22 +123,22 @@ services:
       - RABBITMQ_URL=amqp://codegen:${RABBITMQ_PASSWORD:-devpassword}@rabbitmq:5672/
       - REDIS_URL=redis://:${REDIS_PASSWORD:-devpassword}@redis:6379/0
       - OLLAMA_HOST=http://host.docker.internal:11434
-      - MODEL_NAME=deepseek-coder:33b-instruct-q4_K_M
+      - MODEL_NAME=deepseek-coder:6.7b-instruct-q4_K_M
     depends_on:
       - rabbitmq
       - redis
     volumes:
       - ./logs:/app/logs
       - ./tests:/app/tests
-      - /var/run/docker.sock:/var/run/docker.sock  # For code execution
+      - /var/run/docker.sock:/var/run/docker.sock
     networks:
       - codegen-net
     restart: unless-stopped
     deploy:
       resources:
         limits:
-          cpus: '2'
-          memory: 3G
+          cpus: '1.5'
+          memory: 1536M
 
   # Improver Agent
   agent-improver:
@@ -161,13 +161,17 @@ services:
     deploy:
       resources:
         limits:
-          cpus: '1'
-          memory: 1G
+          cpus: '0.5'
+          memory: 512M
 
+# Named volumes - these persist data
 volumes:
   rabbitmq_data:
+    driver: local
   redis_data:
+    driver: local
 
+# Network definition - MUST be at root level, not indented under services
 networks:
   codegen-net:
     driver: bridge

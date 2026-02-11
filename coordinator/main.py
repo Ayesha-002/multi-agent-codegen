@@ -1,4 +1,4 @@
-from fastapi import FastAPI, HTTPException, BackgroundTasks
+from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel
 from typing import Optional, Dict, Any, List
 import structlog
@@ -6,10 +6,9 @@ import redis.asyncio as redis
 import pika
 import json
 import uuid
-import asyncio
 from datetime import datetime
+import os
 
-# Configure structured logging
 structlog.configure(
     processors=[
         structlog.processors.TimeStamper(fmt="iso"),
@@ -22,12 +21,10 @@ logger = structlog.get_logger()
 
 app = FastAPI(title="Multi-Agent Code Generator")
 
-# Global state
 redis_client: Optional[redis.Redis] = None
 rabbitmq_connection = None
 rabbitmq_channel = None
 
-# Request/Response Models
 class CodeGenerationRequest(BaseModel):
     prompt: str
     language: str = "python"
@@ -41,43 +38,38 @@ class CodeGenerationResponse(BaseModel):
     tests: Optional[List[Dict[str, Any]]] = None
     iterations: int = 0
     errors: Optional[List[str]] = None
-    execution_time_seconds: Optional[float] = None
 
-# Workflow State
 class WorkflowState(BaseModel):
     request_id: str
     current_stage: str
     iterations: int
-    code: Optional[str]
-    test_results: Optional[Dict]
-    errors: List[str]
-    created_at: datetime
-    updated_at: datetime
+    code: Optional[str] = None
+    test_results: Optional[Dict] = None
+    errors: List[str] = []
+    created_at: str
+    updated_at: str
 
 @app.on_event("startup")
 async def startup():
     global redis_client, rabbitmq_connection, rabbitmq_channel
     
-    # Initialize Redis
-    redis_client = await redis.from_url(
-        "redis://:devpassword@redis:6379/0",
-        encoding="utf-8",
-        decode_responses=True
-    )
-    
-    # Initialize RabbitMQ
-    import os
-    rabbitmq_url = os.getenv("RABBITMQ_URL", "amqp://codegen:devpassword@rabbitmq:5672/")
-    params = pika.URLParameters(rabbitmq_url)
-    rabbitmq_connection = pika.BlockingConnection(params)
-    rabbitmq_channel = rabbitmq_connection.channel()
-    
-    # Declare queues
-    queues = ["code_writer", "verifier", "tester", "improver", "results"]
-    for queue in queues:
-        rabbitmq_channel.queue_declare(queue=queue, durable=True)
-    
-    logger.info("coordinator_started", redis_connected=True, rabbitmq_connected=True)
+    try:
+        redis_url = os.getenv("REDIS_URL", "redis://:devpassword@redis:6379/0")
+        redis_client = await redis.from_url(redis_url, encoding="utf-8", decode_responses=True)
+        
+        rabbitmq_url = os.getenv("RABBITMQ_URL", "amqp://codegen:devpassword@rabbitmq:5672/")
+        params = pika.URLParameters(rabbitmq_url)
+        rabbitmq_connection = pika.BlockingConnection(params)
+        rabbitmq_channel = rabbitmq_connection.channel()
+        
+        queues = ["code_writer", "verifier", "tester", "improver", "results"]
+        for queue in queues:
+            rabbitmq_channel.queue_declare(queue=queue, durable=True)
+        
+        logger.info("coordinator_started", redis_connected=True, rabbitmq_connected=True)
+    except Exception as e:
+        logger.error("startup_failed", error=str(e))
+        raise
 
 @app.on_event("shutdown")
 async def shutdown():
@@ -85,35 +77,25 @@ async def shutdown():
         await redis_client.close()
     if rabbitmq_connection:
         rabbitmq_connection.close()
-    logger.info("coordinator_shutdown")
+
+@app.get("/health")
+async def health_check():
+    return {"status": "healthy", "service": "coordinator"}
 
 @app.post("/generate", response_model=CodeGenerationResponse)
-async def generate_code(request: CodeGenerationRequest, background_tasks: BackgroundTasks):
-    """
-    Main endpoint to trigger code generation workflow
-    """
+async def generate_code(request: CodeGenerationRequest):
     request_id = str(uuid.uuid4())
     
-    # Initialize workflow state
     state = WorkflowState(
         request_id=request_id,
         current_stage="writer",
         iterations=0,
-        code=None,
-        test_results=None,
-        errors=[],
-        created_at=datetime.utcnow(),
-        updated_at=datetime.utcnow()
+        created_at=datetime.utcnow().isoformat(),
+        updated_at=datetime.utcnow().isoformat()
     )
     
-    # Store in Redis
-    await redis_client.setex(
-        f"workflow:{request_id}",
-        3600,  # 1 hour TTL
-        state.json()
-    )
+    await redis_client.setex(f"workflow:{request_id}", 3600, state.json())
     
-    # Publish to code_writer queue
     message = {
         "request_id": request_id,
         "prompt": request.prompt,
@@ -126,25 +108,15 @@ async def generate_code(request: CodeGenerationRequest, background_tasks: Backgr
         exchange='',
         routing_key='code_writer',
         body=json.dumps(message),
-        properties=pika.BasicProperties(
-            delivery_mode=2,  # Persistent
-            content_type='application/json'
-        )
+        properties=pika.BasicProperties(delivery_mode=2, content_type='application/json')
     )
     
-    logger.info("workflow_initiated", request_id=request_id, prompt=request.prompt[:100])
+    logger.info("workflow_initiated", request_id=request_id)
     
-    return CodeGenerationResponse(
-        request_id=request_id,
-        status="processing",
-        iterations=0
-    )
+    return CodeGenerationResponse(request_id=request_id, status="processing", iterations=0)
 
 @app.get("/status/{request_id}", response_model=CodeGenerationResponse)
 async def get_status(request_id: str):
-    """
-    Check workflow status
-    """
     state_json = await redis_client.get(f"workflow:{request_id}")
     
     if not state_json:
@@ -152,29 +124,13 @@ async def get_status(request_id: str):
     
     state = WorkflowState.parse_raw(state_json)
     
-    if state.current_stage == "completed":
-        return CodeGenerationResponse(
-            request_id=request_id,
-            status="completed",
-            code=state.code,
-            tests=state.test_results.get("tests") if state.test_results else None,
-            iterations=state.iterations,
-            errors=state.errors if state.errors else None
-        )
-    elif state.current_stage == "failed":
-        return CodeGenerationResponse(
-            request_id=request_id,
-            status="failed",
-            code=state.code,
-            iterations=state.iterations,
-            errors=state.errors
-        )
-    else:
-        return CodeGenerationResponse(
-            request_id=request_id,
-            status="processing",
-            iterations=state.iterations
-        )
+    return CodeGenerationResponse(
+        request_id=request_id,
+        status=state.current_stage,
+        code=state.code,
+        iterations=state.iterations,
+        errors=state.errors if state.errors else None
+    )
 
 if __name__ == "__main__":
     import uvicorn
