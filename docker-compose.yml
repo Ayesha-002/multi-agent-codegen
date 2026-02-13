@@ -10,9 +10,10 @@ services:
       - "15672:15672"
     environment:
       RABBITMQ_DEFAULT_USER: codegen
-      RABBITMQ_DEFAULT_PASS: ${RABBITMQ_PASSWORD:-devpassword}
+      RABBITMQ_DEFAULT_PASS: ${RABBITMQ_PASSWORD}
     volumes:
       - rabbitmq_data:/var/lib/rabbitmq
+      - ./infrastructure/rabbitmq/rabbitmq.conf:/etc/rabbitmq/rabbitmq.conf:ro
     healthcheck:
       test: ["CMD", "rabbitmq-diagnostics", "ping"]
       interval: 10s
@@ -27,7 +28,7 @@ services:
     container_name: codegen-redis
     ports:
       - "6379:6379"
-    command: redis-server --appendonly yes --requirepass ${REDIS_PASSWORD:-devpassword}
+    command: redis-server --appendonly yes --requirepass ${REDIS_PASSWORD}
     volumes:
       - redis_data:/data
     healthcheck:
@@ -71,8 +72,8 @@ services:
       dockerfile: Dockerfile
     container_name: codegen-agent-writer
     environment:
-      - RABBITMQ_URL=amqp://codegen:${RABBITMQ_PASSWORD:-devpassword}@rabbitmq:5672/
-      - REDIS_URL=redis://:${REDIS_PASSWORD:-devpassword}@redis:6379/0
+      - RABBITMQ_URL=amqp://codegen:${RABBITMQ_PASSWORD}@rabbitmq:5672/
+      - REDIS_URL=redis://:${REDIS_PASSWORD}@redis:6379/0
       - OLLAMA_HOST=http://host.docker.internal:11434
       - MODEL_NAME=deepseek-coder:6.7b-instruct-q4_K_M
     depends_on:
@@ -96,9 +97,10 @@ services:
       dockerfile: Dockerfile
     container_name: codegen-agent-verifier
     environment:
-      - RABBITMQ_URL=amqp://codegen:${RABBITMQ_PASSWORD:-devpassword}@rabbitmq:5672/
-      - REDIS_URL=redis://:${REDIS_PASSWORD:-devpassword}@redis:6379/0
-      - ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY}
+      - RABBITMQ_URL=amqp://codegen:${RABBITMQ_PASSWORD}@rabbitmq:5672/
+      - REDIS_URL=redis://:${REDIS_PASSWORD}@redis:6379/0
+      - OLLAMA_HOST=http://host.docker.internal:11434
+      - MODEL_NAME=deepseek-coder:6.7b-instruct-q4_K_M
     depends_on:
       - rabbitmq
       - redis
@@ -120,8 +122,8 @@ services:
       dockerfile: Dockerfile
     container_name: codegen-agent-tester
     environment:
-      - RABBITMQ_URL=amqp://codegen:${RABBITMQ_PASSWORD:-devpassword}@rabbitmq:5672/
-      - REDIS_URL=redis://:${REDIS_PASSWORD:-devpassword}@redis:6379/0
+      - RABBITMQ_URL=amqp://codegen:${RABBITMQ_PASSWORD}@rabbitmq:5672/
+      - REDIS_URL=redis://:${REDIS_PASSWORD}@redis:6379/0
       - OLLAMA_HOST=http://host.docker.internal:11434
       - MODEL_NAME=deepseek-coder:6.7b-instruct-q4_K_M
     depends_on:
@@ -147,9 +149,10 @@ services:
       dockerfile: Dockerfile
     container_name: codegen-agent-improver
     environment:
-      - RABBITMQ_URL=amqp://codegen:${RABBITMQ_PASSWORD:-devpassword}@rabbitmq:5672/
-      - REDIS_URL=redis://:${REDIS_PASSWORD:-devpassword}@redis:6379/0
-      - ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY}
+      - RABBITMQ_URL=amqp://codegen:${RABBITMQ_PASSWORD}@rabbitmq:5672/
+      - REDIS_URL=redis://:${REDIS_PASSWORD}@redis:6379/0
+      - OLLAMA_HOST=http://host.docker.internal:11434
+      - MODEL_NAME=deepseek-coder:6.7b-instruct-q4_K_M
     depends_on:
       - rabbitmq
       - redis

@@ -52,21 +52,38 @@ class WorkflowState(BaseModel):
 @app.on_event("startup")
 async def startup():
     global redis_client, rabbitmq_connection, rabbitmq_channel
-    
+
     try:
-        redis_url = os.getenv("REDIS_URL", "redis://:devpassword@redis:6379/0")
-        redis_client = await redis.from_url(redis_url, encoding="utf-8", decode_responses=True)
-        
-        rabbitmq_url = os.getenv("RABBITMQ_URL", "amqp://codegen:devpassword@rabbitmq:5672/")
-        params = pika.URLParameters(rabbitmq_url)
-        rabbitmq_connection = pika.BlockingConnection(params)
-        rabbitmq_channel = rabbitmq_connection.channel()
-        
+        # ✅ Uses env vars properly - no hardcoded passwords
+        redis_url    = os.getenv("REDIS_URL")
+        rabbitmq_url = os.getenv("RABBITMQ_URL")
+
+        redis_client = await redis.from_url(
+            redis_url, encoding="utf-8", decode_responses=True
+        )
+
+        # Retry RabbitMQ connection (coordinator starts before RabbitMQ is ready)
+        import time
+        for attempt in range(15):
+            try:
+                params = pika.URLParameters(rabbitmq_url)
+                params.heartbeat = 0
+                rabbitmq_connection = pika.BlockingConnection(params)
+                rabbitmq_channel    = rabbitmq_connection.channel()
+                break
+            except Exception:
+                if attempt < 14:
+                    time.sleep(3)
+                else:
+                    raise
+
         queues = ["code_writer", "verifier", "tester", "improver", "results"]
         for queue in queues:
             rabbitmq_channel.queue_declare(queue=queue, durable=True)
-        
-        logger.info("coordinator_started", redis_connected=True, rabbitmq_connected=True)
+
+        logger.info("coordinator_started",
+                    redis_connected=True, rabbitmq_connected=True)
+
     except Exception as e:
         logger.error("startup_failed", error=str(e))
         raise
