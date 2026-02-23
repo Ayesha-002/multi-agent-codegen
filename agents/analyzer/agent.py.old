@@ -1,0 +1,343 @@
+import pika
+import json
+import os
+import re
+import structlog
+import redis
+from utils import connect_rabbitmq, reconnect_on_failure
+
+structlog.configure(
+    processors=[
+        structlog.processors.TimeStamper(fmt="iso"),
+        structlog.processors.add_log_level,
+        structlog.processors.JSONRenderer()
+    ]
+)
+
+logger = structlog.get_logger()
+
+RABBITMQ_URL = os.getenv("RABBITMQ_URL")
+REDIS_URL    = os.getenv("REDIS_URL")
+
+# ── Language keyword map ──────────────────────────────────────────────
+LANGUAGE_PATTERNS = {
+    "python":     [r"\bpython\b", r"\bpy\b", r"\bdjango\b", r"\bflask\b",
+                   r"\bfastapi\b", r"\bpandas\b", r"\bnumpy\b", r"\bpytest\b"],
+    "javascript": [r"\bjavascript\b", r"\bjs\b", r"\bnode(\.?js)?\b",
+                   r"\breact\b", r"\bvue\b", r"\bexpress\b", r"\bnext\.?js\b"],
+    "typescript": [r"\btypescript\b", r"\bts\b", r"\bangular\b", r"\bdeno\b"],
+    "java":       [r"\bjava\b", r"\bspring\b", r"\bmaven\b", r"\bgradle\b",
+                   r"\bhibernate\b"],
+    "go":         [r"\bgolang\b", r"\bgo\b(?! to)", r"\bgoroutine\b", r"\bgin\b"],
+    "rust":       [r"\brust\b", r"\bcargo\b", r"\btokio\b"],
+    "cpp":        [r"\bc\+\+\b", r"\bcpp\b", r"\bstl\b"],
+    "csharp":     [r"\bc#\b", r"\bcsharp\b", r"\.net\b", r"\basp\.net\b",
+                   r"\bwpf\b", r"\bxaml\b"],
+    "php":        [r"\bphp\b", r"\blaravel\b", r"\bwordpress\b"],
+    "ruby":       [r"\bruby\b", r"\brails\b", r"\bsinatra\b"],
+    "swift":      [r"\bswift\b", r"\bios\b", r"\bxcode\b", r"\bswiftui\b"],
+    "kotlin":     [r"\bkotlin\b", r"\bandroid\b"],
+    "sql":        [r"\bsql\b", r"\bmysql\b", r"\bpostgres(ql)?\b",
+                   r"\bsqlite\b", r"\bdatabase query\b"],
+    "bash":       [r"\bbash\b", r"\bshell script\b", r"\bsh script\b",
+                   r"\blinux script\b", r"\bzsh\b"],
+    "html":       [r"\bhtml\b", r"\bcss\b", r"\bwebpage\b", r"\bfront.?end\b"],
+}
+
+# ── Requirement inference ─────────────────────────────────────────────
+REQUIREMENT_PATTERNS = {
+    "Add type hints":          [r"\btype hint", r"\btyped?\b", r"\bstatic type"],
+    "Include error handling":  [r"\berror handl", r"\bexception", r"\btry.?catch",
+                                r"\bfail", r"\bedge case"],
+    "Add docstrings":          [r"\bdocstring", r"\bdocument", r"\bcomment"],
+    "Add logging":             [r"\blog(ging)?\b"],
+    "Use async/await":         [r"\basync\b", r"\bawait\b", r"\bconcurren",
+                                r"\bparallel"],
+    "Add retry logic":         [r"\bretry\b", r"\bretries\b"],
+    "Include unit tests":      [r"\btest\b", r"\bunit test", r"\bpytest"],
+    "Use OOP/classes":         [r"\bclass\b", r"\boop\b", r"\bobject.?oriented"],
+    "Optimize for performance":[r"\bfast\b", r"\boptimi", r"\bperform",
+                                r"\befficient"],
+    "Add input validation":    [r"\bvalidat", r"\bsaniti", r"\bcheck input"],
+    "Use dataclass/typing":    [r"\bdataclass", r"\btyping\b", r"\bpydantic"],
+    "Return JSON":             [r"\bjson\b", r"\bapi response", r"\brest"],
+    "Add memoization":         [r"\bmemoi", r"\bcache", r"\bmemo\b"],
+}
+
+# ── Unclear prompt signals ─────────────────────────────────────────────
+UNCLEAR_SIGNALS = [
+    r"^(write|make|create|build|do|give me|generate)\s+(some)?\s*code\s*$",
+    r"^(write|make|create|build|do|generate)\s+(something|it|this|that)\s*$",
+    r"^(fix|update|improve|change)\s+(my|the|this|it)\s*$",
+    r"^(help|please|can you)\s+(me|write|code)\s*$",
+    r"^(code|script|function|program)\s*$",
+    r"^write\s+code\s+for\s+my\s+(project|app|website|system)\s*$",
+]
+
+# ── Task type inference ────────────────────────────────────────────────
+TASK_ENRICHMENTS = {
+    # REST API
+    r"\brest\s*api\b|\bhttp\s*client\b|\bapi\s*client\b": {
+        "extra_reqs": ["Handle HTTP errors", "Return typed response", "Add timeout"],
+        "suffix": "Include proper HTTP error handling and connection timeout."
+    },
+    # Sorting / Searching
+    r"\bsort(ing)?\b|\bsearch(ing)?\b|\bfind\b": {
+        "extra_reqs": ["Handle empty input", "Add type hints"],
+        "suffix": "Handle edge cases: empty list, single element, duplicates."
+    },
+    # File operations
+    r"\bread.*(file|csv|json|xml)\b|\bparse.*(file|csv)\b": {
+        "extra_reqs": ["Handle file not found", "Handle encoding errors"],
+        "suffix": "Handle FileNotFoundError and encoding issues gracefully."
+    },
+    # Database
+    r"\bdatabase\b|\bdb\b|\bsql\b|\bquery\b": {
+        "extra_reqs": ["Use parameterized queries", "Handle connection errors"],
+        "suffix": "Use parameterized queries to prevent SQL injection."
+    },
+    # Calculator / Math
+    r"\bcalculat\b|\bmath\b|\bformula\b": {
+        "extra_reqs": ["Handle division by zero", "Validate numeric input"],
+        "suffix": "Handle edge cases like division by zero and invalid inputs."
+    },
+    # Auth / Login
+    r"\bauth(entication)?\b|\blogin\b|\bpassword\b|\bjwt\b": {
+        "extra_reqs": ["Hash passwords securely", "Never store plaintext passwords"],
+        "suffix": "Use secure hashing (bcrypt/argon2). Never store plaintext passwords."
+    },
+    # Statistics / Data
+    r"\bstat(istic)?s?\b|\bmean\b|\bmedian\b|\banalys": {
+        "extra_reqs": ["Handle empty dataset", "Return formatted output"],
+        "suffix": "Handle empty datasets. Return formatted, readable output."
+    },
+    # CLI / Script
+    r"\bcli\b|\bcommand.?line\b|\bargparse\b|\bscript\b": {
+        "extra_reqs": ["Add argparse", "Include --help"],
+        "suffix": "Use argparse with clear --help documentation."
+    },
+    # Web scraping
+    r"\bscrap(e|ing|er)\b|\bcrawl\b|\bbeautiful.?soup\b": {
+        "extra_reqs": ["Handle HTTP errors", "Respect rate limits"],
+        "suffix": "Handle HTTP errors and add polite delays between requests."
+    },
+    # Fibonacci / Recursion
+    r"\bfibonacci\b|\brecursi\b|\bmemoiz": {
+        "extra_reqs": ["Add memoization", "Handle negative input"],
+        "suffix": "Use memoization for efficiency. Handle negative/zero inputs."
+    },
+}
+
+
+class PromptAnalyzerAgent:
+
+    def __init__(self):
+        self.redis      = redis.from_url(REDIS_URL, decode_responses=True)
+        self.connection = None
+        self.channel    = None
+        logger.info("analyzer_agent_created", mode="rule-based (no LLM)")
+
+    def setup_channel(self):
+        self.connection = connect_rabbitmq(RABBITMQ_URL)
+        self.channel    = self.connection.channel()
+        self.channel.queue_declare(queue='analyzer',    durable=True)
+        self.channel.queue_declare(queue='code_writer', durable=True)
+        self.channel.basic_qos(prefetch_count=1)
+        self.channel.basic_consume(
+            queue='analyzer', on_message_callback=self.callback)
+        logger.info("analyzer_channel_ready")
+
+    # ── Language Detection ─────────────────────────────────────────────
+    def detect_language(self, prompt: str, user_lang: str | None) -> str:
+        """Fast regex-based language detection. No LLM needed."""
+        if user_lang and user_lang.lower() not in ("", "none"):
+            return user_lang.lower()
+
+        p = prompt.lower()
+        for lang, patterns in LANGUAGE_PATTERNS.items():
+            for pat in patterns:
+                if re.search(pat, p, re.IGNORECASE):
+                    return lang
+
+        # Default: Python is most commonly expected
+        return "python"
+
+    # ── Clarity Check ─────────────────────────────────────────────────
+    def is_prompt_clear(self, prompt: str) -> tuple[bool, list[str]]:
+        """Check if the prompt is too vague to generate useful code."""
+        p = prompt.strip().lower()
+
+        # Only reject extremely vague prompts
+        if len(p.split()) < 2:
+            return False, ["What do you want the code to do?"]
+    
+        # Reject only truly useless prompts
+        if p in ["code", "help", "hi", "hello", "test"]:
+            return False, ["Please describe what code you need"]
+
+        # Matches known vague patterns
+        for pattern in UNCLEAR_SIGNALS:
+            if re.match(pattern, p, re.IGNORECASE):
+                return False, [
+                    "What specific functionality do you need?",
+                    "Which programming language should be used?",
+                    "Are there any specific libraries or frameworks to use?",
+                ]
+
+        return True, []
+
+    # ── Requirement Inference ──────────────────────────────────────────
+    def infer_requirements(self, prompt: str, user_reqs: list) -> list[str]:
+        """Infer technical requirements from prompt keywords."""
+        p = prompt.lower()
+        inferred = set(user_reqs)  # Start with what user provided
+
+        for req, patterns in REQUIREMENT_PATTERNS.items():
+            for pat in patterns:
+                if re.search(pat, p, re.IGNORECASE):
+                    inferred.add(req)
+                    break
+
+        # Always add these basics
+        inferred.add("Add type hints")
+        inferred.add("Include error handling")
+
+        return list(inferred)
+
+    # ── Prompt Enrichment ──────────────────────────────────────────────
+    def enrich_prompt(self, prompt: str, language: str, requirements: list) -> str:
+        """Rewrite the prompt to be more specific and actionable."""
+        p   = prompt.strip()
+        p_l = p.lower()
+
+        # Find matching task enrichments
+        suffix_parts = []
+        extra_reqs   = []
+        for pattern, data in TASK_ENRICHMENTS.items():
+            if re.search(pattern, p_l, re.IGNORECASE):
+                suffix_parts.append(data["suffix"])
+                extra_reqs.extend(data.get("extra_reqs", []))
+
+        # Build enriched prompt
+        lang_capitalized = language.capitalize()
+
+        # Ensure prompt starts properly
+        if not any(p_l.startswith(kw) for kw in
+                   ["write", "create", "build", "implement", "make",
+                    "develop", "generate"]):
+            p = f"Write a {lang_capitalized} program that {p}"
+        elif not any(lang.lower() in p_l for lang in LANGUAGE_PATTERNS.keys()):
+            # Inject language if not mentioned
+            p = p.rstrip(".").rstrip() + f" in {lang_capitalized}"
+
+        # Add requirements block
+        all_reqs = list(set(requirements + extra_reqs))
+        if all_reqs:
+            req_text = "\n".join(f"- {r}" for r in sorted(all_reqs))
+            p = f"{p}\n\nRequirements:\n{req_text}"
+
+        # Add enrichment suffixes
+        if suffix_parts:
+            p = p + "\n\nAdditional notes:\n" + "\n".join(f"- {s}" for s in suffix_parts)
+
+        return p
+
+    # ── Main Analysis (no LLM, instant) ───────────────────────────────
+    def analyze(self, prompt: str, user_lang: str | None, user_reqs: list) -> dict:
+        language     = self.detect_language(prompt, user_lang)
+        is_clear, questions = self.is_prompt_clear(prompt)
+        requirements = self.infer_requirements(prompt, user_reqs)
+        enriched     = self.enrich_prompt(prompt, language, requirements) if is_clear else prompt
+
+        return {
+            "is_clear":        is_clear,
+            "language":        language,
+            "questions":       questions,
+            "requirements":    requirements,
+            "enriched_prompt": enriched,
+        }
+
+    # ── Message Handler ────────────────────────────────────────────────
+    def callback(self, ch, method, properties, body):
+        try:
+            message    = json.loads(body)
+            request_id = message['request_id']
+            prompt     = message['prompt']
+            user_lang  = message.get('language')
+            user_reqs  = message.get('requirements', [])
+
+            logger.info("analyzing_prompt",
+                        request_id=request_id,
+                        prompt_preview=prompt[:80])
+
+            raw   = self.redis.get(f"workflow:{request_id}")
+            state = json.loads(raw) if raw else {}
+
+            # Check if user already answered clarification questions
+            user_answers = message.get('user_answers', {})
+            if user_answers:
+                # Append answers into the prompt
+                answers_text = "\n".join(f"- {q}: {a}"
+                                         for q, a in user_answers.items())
+                prompt = prompt + f"\n\nUser clarifications:\n{answers_text}"
+                user_lang = user_answers.get(
+                    "Which programming language should be used?", user_lang)
+
+            result = self.analyze(prompt, user_lang, user_reqs)
+
+            logger.info("analysis_complete",
+                        request_id=request_id,
+                        is_clear=result['is_clear'],
+                        language=result['language'],
+                        requirements_count=len(result['requirements']))
+
+            if result['is_clear'] or user_answers:
+                # ✅ Send to writer
+                state['current_stage']   = 'writer'
+                state['language']        = result['language']
+                state['enriched_prompt'] = result['enriched_prompt']
+                state['requirements']    = result['requirements']
+                self.redis.setex(
+                    f"workflow:{request_id}", 3600, json.dumps(state))
+
+                self.channel.basic_publish(
+                    exchange='',
+                    routing_key='code_writer',
+                    body=json.dumps({
+                        "request_id":     request_id,
+                        "prompt":         result['enriched_prompt'],
+                        "language":       result['language'],
+                        "requirements":   result['requirements'],
+                        "max_iterations": message.get('max_iterations', 5),
+                    }),
+                    properties=pika.BasicProperties(delivery_mode=2)
+                )
+                logger.info("sent_to_writer",
+                            request_id=request_id,
+                            language=result['language'],
+                            prompt_length=len(result['enriched_prompt']))
+            else:
+                # ❓ Ask user
+                state['current_stage']    = 'needs_clarification'
+                state['questions']        = result['questions']
+                state['original_message'] = message
+                self.redis.setex(
+                    f"workflow:{request_id}", 3600, json.dumps(state))
+                logger.info("needs_clarification",
+                            request_id=request_id,
+                            questions=result['questions'])
+
+            ch.basic_ack(delivery_tag=method.delivery_tag)
+
+        except Exception as e:
+            logger.error("callback_error", error=str(e))
+            ch.basic_nack(delivery_tag=method.delivery_tag, requeue=False)
+
+    def start(self):
+        logger.info("analyzer_agent_starting")
+        reconnect_on_failure(self, PromptAnalyzerAgent.setup_channel)
+
+
+if __name__ == "__main__":
+    agent = PromptAnalyzerAgent()
+    agent.start()

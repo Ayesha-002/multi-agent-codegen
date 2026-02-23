@@ -66,7 +66,7 @@ services:
       - RABBITMQ_URL=amqp://codegen:${RABBITMQ_PASSWORD}@rabbitmq:5672/
       - REDIS_URL=redis://:${REDIS_PASSWORD}@redis:6379/0
       - OLLAMA_HOST=http://host.docker.internal:11434
-      - MODEL_NAME=deepseek-coder:1.3b-instruct
+      - MODEL_NAME=deepseek-coder:6.7b-instruct-q4_K_M
     depends_on:
       - rabbitmq
       - redis
@@ -90,7 +90,7 @@ services:
       - RABBITMQ_URL=amqp://codegen:${RABBITMQ_PASSWORD}@rabbitmq:5672/
       - REDIS_URL=redis://:${REDIS_PASSWORD}@redis:6379/0
       - OLLAMA_HOST=http://host.docker.internal:11434
-      - MODEL_NAME=deepseek-coder:1.3b-instruct
+      - MODEL_NAME=deepseek-coder:6.7b-instruct-q4_K_M
     depends_on:
       - rabbitmq
       - redis
@@ -114,7 +114,7 @@ services:
       - RABBITMQ_URL=amqp://codegen:${RABBITMQ_PASSWORD}@rabbitmq:5672/
       - REDIS_URL=redis://:${REDIS_PASSWORD}@redis:6379/0
       - OLLAMA_HOST=http://host.docker.internal:11434
-      - MODEL_NAME=deepseek-coder:1.3b-instruct
+      - MODEL_NAME=deepseek-coder:6.7b-instruct-q4_K_M
     depends_on:
       - rabbitmq
       - redis
@@ -138,7 +138,7 @@ services:
       - RABBITMQ_URL=amqp://codegen:${RABBITMQ_PASSWORD}@rabbitmq:5672/
       - REDIS_URL=redis://:${REDIS_PASSWORD}@redis:6379/0
       - OLLAMA_HOST=http://host.docker.internal:11434
-      - MODEL_NAME=deepseek-coder:1.3b-instruct
+      - MODEL_NAME=deepseek-coder:6.7b-instruct-q4_K_M
     depends_on:
       - rabbitmq
       - redis
@@ -162,7 +162,7 @@ services:
       - RABBITMQ_URL=amqp://codegen:${RABBITMQ_PASSWORD}@rabbitmq:5672/
       - REDIS_URL=redis://:${REDIS_PASSWORD}@redis:6379/0
       - OLLAMA_HOST=http://host.docker.internal:11434
-      - MODEL_NAME=deepseek-coder:1.3b-instruct
+      - MODEL_NAME=deepseek-coder:6.7b-instruct-q4_K_M
     depends_on:
       - rabbitmq
       - redis

@@ -804,3 +804,91 @@ Use this to:
 ---
 
 *Built with DeepSeek-Coder, Ollama, RabbitMQ, Redis, FastAPI, and Docker.*
+
+
+
+error resolved 
+error :You're right - the writer is stuck. It's been 2+ minutes at "writer" stage. Let me fix both issues:
+Issue 1: Writer is Stuck - Check Logs
+**# Check what's happening with the writer
+docker-compose logs --tail=30 agent-writer
+Most likely causes:
+
+Ollama ran out of memory again
+Writer crashed
+Model unloaded from RAM
+
+Quick Fix: Restart Writer
+# Restart just the writer agent
+docker-compose restart agent-writer
+
+# Check it comes back online
+docker-compose logs -f agent-writer
+
+# give a prompt
+(venv) PS C:\Users\User\multi-agent-codegen> Write-Host "SMART AGENT TEST - Natural Prompts" -ForegroundColor Magenta
+>>
+>> $prompts = @(
+>>     "hey make me a calculator",
+>>     "I need something that reads CSV files and shows stats",
+>>     "fibonacci with memoization",
+>>     "sort a list",
+>>     "build a REST API for user management"
+>> )
+>>
+>> foreach ($p in $prompts) {
+>>     Write-Host "`n=== Testing: $p ===" -ForegroundColor Cyan
+>>
+>>     $body = "{`"prompt`":`"$p`"}"
+>>     $r = Invoke-RestMethod -Uri "http://localhost:8000/generate" -Method POST -ContentType "application/json" -Body $body
+>>
+>>     Write-Host "ID: $($r.request_id)" -ForegroundColor Green
+>>
+>>     for ($i = 0; $i -lt 10; $i++) {
+>>         Start-Sleep -Seconds 10
+>>         try {
+>>             $s = Invoke-RestMethod -Uri "http://localhost:8000/status/$($r.request_id)"
+>>
+>>             if ($s.status -eq "completed") {
+>>                 Write-Host "✓ SUCCESS in $(($i+1)*10)s" -ForegroundColor Green
+>>                 Write-Host "Preview: $($s.code.Substring(0, [Math]::Min(150, $s.code.Length)))..." -ForegroundColor Gray
+>>                 break
+>>             }
+>>             elseif ($s.status -eq "failed") {
+>>                 Write-Host "✗ FAILED" -ForegroundColor Red
+>>                 break
+>>             }
+>>         }
+>>         catch { }
+>>     }
+>> }
+
+# to see the written code 
+(venv) PS C:\Users\User\multi-agent-codegen> # Check all the requests you just submitted
+>> $ids = @(
+>>     "2fb1671d-ef58-432e-a12b-acf44bd68d39",  # calculator
+>>     "2fb1f0c8-a4af-4c92-9d7e-5d74beeeebeb",  # CSV reader
+>>     "06d00a80-ae4f-4444-a51f-e5be337d4342",  # fibonacci
+>>     "0d49bf8d-aa7b-4451-83be-bca916dc951d",  # sort list
+>>     "b4221412-a312-4f47-8d06-1ba0cc6c18d0",  # REST API
+>>     "6c644960-261c-4ccc-926f-b4cbffc6ff96"   # code improvement
+>> )
+>>
+>> foreach ($id in $ids) {
+>>     try {
+>>         $s = Invoke-RestMethod -Uri "http://localhost:8000/status/$id"
+>>         Write-Host "`n========================================" -ForegroundColor Cyan
+>>         Write-Host "Request: $id" -ForegroundColor Yellow
+>>         Write-Host "Status: $($s.status) | Language: $($s.language) | Iterations: $($s.iterations)" -ForegroundColor Gray
+>>
+>>         if ($s.code) {
+>>             Write-Host "`nGENERATED CODE:" -ForegroundColor Green
+>>             Write-Host $s.code -ForegroundColor White
+>>         } else {
+>>             Write-Host "Status: $($s.status)" -ForegroundColor Yellow
+>>         }
+>>     }
+>>     catch {
+>>         Write-Host "`nRequest $id - Not found or expired" -ForegroundColor Red
+>>     }
+>> }

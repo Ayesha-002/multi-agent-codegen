@@ -4,7 +4,6 @@ import os
 import re
 import structlog
 import redis
-import requests
 from utils import connect_rabbitmq, reconnect_on_failure
 
 structlog.configure(
@@ -19,258 +18,228 @@ logger = structlog.get_logger()
 
 RABBITMQ_URL = os.getenv("RABBITMQ_URL")
 REDIS_URL    = os.getenv("REDIS_URL")
-OLLAMA_HOST  = os.getenv("OLLAMA_HOST", "http://host.docker.internal:11434")
-MODEL_NAME   = os.getenv("MODEL_NAME",  "deepseek-coder:6.7b-instruct-q4_K_M")
 
-# Languages we support
-SUPPORTED_LANGUAGES = [
-    "python", "javascript", "typescript", "java", "go",
-    "rust", "c", "cpp", "csharp", "php", "ruby", "swift",
-    "kotlin", "sql", "bash", "html", "css"
-]
+# Language detection (expanded)
+LANG_KEYWORDS = {
+    "python":     r"\b(python|py|django|flask|fastapi|pandas|numpy|pytest|pip)\b",
+    "javascript": r"\b(javascript|js|node|react|vue|angular|express|npm|typescript|ts)\b",
+    "java":       r"\b(java|spring|maven|gradle|junit)\b",
+    "go":         r"\b(golang|go\b)\b",
+    "rust":       r"\b(rust|cargo)\b",
+    "cpp":        r"\b(c\+\+|cpp)\b",
+    "c":          r"\b\bc\b(?![\+\#])",
+    "csharp":     r"\b(c#|csharp|\.net|asp\.net)\b",
+    "php":        r"\b(php|laravel|wordpress)\b",
+    "ruby":       r"\b(ruby|rails)\b",
+    "swift":      r"\b(swift|ios|swiftui)\b",
+    "kotlin":     r"\b(kotlin|android)\b",
+}
 
-
-class PromptAnalyzerAgent:
+class SmartAnalyzerAgent:
     def __init__(self):
-        self.ollama_host = OLLAMA_HOST
-        self.model       = MODEL_NAME
-        self.redis       = redis.from_url(REDIS_URL, decode_responses=True)
-        self.connection  = None
-        self.channel     = None
-        logger.info("analyzer_agent_created", model=self.model)
+        self.redis      = redis.from_url(REDIS_URL, decode_responses=True)
+        self.connection = None
+        self.channel    = None
+        logger.info("smart_analyzer_created", mode="conversational")
 
     def setup_channel(self):
         self.connection = connect_rabbitmq(RABBITMQ_URL)
         self.channel    = self.connection.channel()
-        self.channel.queue_declare(queue='analyzer',     durable=True)
-        self.channel.queue_declare(queue='code_writer',  durable=True)
+        self.channel.queue_declare(queue='analyzer',    durable=True)
+        self.channel.queue_declare(queue='code_writer', durable=True)
         self.channel.basic_qos(prefetch_count=1)
-        self.channel.basic_consume(
-            queue='analyzer', on_message_callback=self.callback)
+        self.channel.basic_consume(queue='analyzer', on_message_callback=self.callback)
         logger.info("analyzer_channel_ready")
 
-    # ------------------------------------------------------------------ #
-    #  Quick rule-based language detection (no LLM needed)
-    # ------------------------------------------------------------------ #
-    def detect_language_from_prompt(self, prompt: str) -> str | None:
-        prompt_lower = prompt.lower()
-        for lang in SUPPORTED_LANGUAGES:
-            # Match whole word only
-            if re.search(rf'\b{lang}\b', prompt_lower):
+    def detect_language(self, text: str) -> str:
+        """Detect language from text, default to Python."""
+        text_lower = text.lower()
+        for lang, pattern in LANG_KEYWORDS.items():
+            if re.search(pattern, text_lower, re.IGNORECASE):
                 return lang
-        # Common aliases
-        aliases = {
-            "js": "javascript", "ts": "typescript",
-            "node": "javascript", "nodejs": "javascript",
-            "c++": "cpp", "c#": "csharp", ".net": "csharp",
-            "golang": "go", "shell": "bash"
-        }
-        for alias, lang in aliases.items():
-            if alias in prompt_lower:
-                return lang
-        return None
+        return "python"  # Default
 
-    # ------------------------------------------------------------------ #
-    #  LLM-based prompt analysis
-    # ------------------------------------------------------------------ #
-    def analyze_prompt(self, prompt: str, language: str | None) -> dict:
-        lang_instruction = (
-            f'Language is already specified as "{language}".'
-            if language
-            else "Language is NOT specified."
-        )
+    def is_code_submission(self, text: str) -> bool:
+        """Detect if user submitted code to improve/fix."""
+        # Check for code indicators
+        code_indicators = [
+            r"def\s+\w+\(",           # Python function
+            r"function\s+\w+\(",      # JS function
+            r"class\s+\w+",           # Class definition
+            r"import\s+\w+",          # Imports
+            r"#include\s*<",          # C/C++ include
+            r"public\s+class",        # Java class
+            r"fn\s+\w+\(",            # Rust function
+            r"\w+\s*=\s*function",    # JS function assignment
+            r"async\s+def",           # Async function
+            r"for\s*\(",              # For loop
+            r"while\s*\(",            # While loop
+            r"if\s*\(",               # If statement
+        ]
+        
+        for pattern in code_indicators:
+            if re.search(pattern, text, re.IGNORECASE):
+                return True
+        
+        # Check if mostly code-like (has semicolons, brackets, etc.)
+        code_chars = text.count('{') + text.count('}') + text.count(';') + text.count('(') + text.count(')')
+        if code_chars > len(text.split()) * 0.3:  # 30% of words have code chars
+            return True
+            
+        return False
 
-        analysis_prompt = f"""You are a software requirements analyst. Analyze this coding request and determine if it has enough information to write good code.
+    def extract_user_intent(self, text: str) -> dict:
+        """Extract what user wants from natural language."""
+        text_lower = text.lower()
+        
+        # Detect mode: improve existing code vs. generate new code
+        if self.is_code_submission(text):
+            mode = "improve"
+            # Try to extract the code block
+            code_match = re.search(r'```[\w]*\n(.*?)```', text, re.DOTALL)
+            if code_match:
+                code = code_match.group(1)
+            else:
+                # Assume the whole message is code
+                code = text
+            
+            # Extract improvement request
+            improvement_keywords = ["fix", "improve", "optimize", "debug", "refactor", "clean up", "add", "make better"]
+            request = "improve and fix this code"
+            for keyword in improvement_keywords:
+                if keyword in text_lower:
+                    request = f"{keyword} this code"
+                    break
+            
+            return {
+                "mode": "improve",
+                "code": code,
+                "request": request
+            }
+        else:
+            # Generate new code mode
+            mode = "generate"
+            
+            # Clean up casual language
+            prompt = text.strip()
+            
+            # Remove conversational filler
+            casual_prefixes = [
+                r"^(hey|hi|hello|yo)\s*,?\s*",
+                r"^(can you|could you|please)\s+",
+                r"^(i need|i want|make me|write me|give me|create)\s+",
+                r"^(help me|show me)\s+",
+            ]
+            for prefix in casual_prefixes:
+                prompt = re.sub(prefix, "", prompt, flags=re.IGNORECASE)
+            
+            # Ensure it starts with an action verb
+            action_verbs = ["write", "create", "make", "build", "develop", "implement", "generate"]
+            has_action = any(prompt.lower().startswith(verb) for verb in action_verbs)
+            
+            if not has_action:
+                prompt = f"Write a program that {prompt}"
+            
+            return {
+                "mode": "generate",
+                "prompt": prompt.strip()
+            }
 
-User request: "{prompt}"
+    def enrich_prompt(self, intent: dict, language: str) -> str:
+        """Convert user intent into a detailed prompt for the writer."""
+        if intent["mode"] == "improve":
+            return f"""Improve and optimize this {language} code:
 
-{lang_instruction}
+{intent['code']}
 
-Evaluate these aspects:
-1. Is the main task/goal clear?
-2. Is the programming language clear or can it be reasonably inferred?
-3. Are there any critical missing details that would prevent writing good code?
+Requirements:
+- Fix any bugs or errors
+- Improve code quality and readability
+- Add error handling
+- Add type hints and docstrings
+- Optimize performance where possible
+- Follow best practices for {language}
 
-Respond ONLY with valid JSON:
-{{
-    "is_clear": true,
-    "confidence": 0.95,
-    "inferred_language": "python",
-    "enriched_prompt": "Write a Python function that...",
-    "missing_info": [],
-    "questions": [],
-    "requirements": ["requirement 1", "requirement 2"]
-}}
+Return ONLY the improved code, no explanations."""
 
-Rules:
-- is_clear: true if you can write good code without asking anything
-- confidence: 0.0 to 1.0 how confident you are
-- inferred_language: best guess at language even if not specified (use "python" as default if truly unclear)
-- enriched_prompt: rewrite the prompt to be more precise and detailed
-- missing_info: list critical things missing (empty if clear)
-- questions: list questions to ask user ONLY if is_clear=false (max 3 questions)
-- requirements: list of specific technical requirements you inferred
+        else:
+            # Generate mode
+            prompt = intent["prompt"]
+            
+            # Add language if not mentioned
+            if language not in prompt.lower():
+                prompt = f"{prompt} in {language.capitalize()}"
+            
+            # Add standard requirements
+            return f"""{prompt}
 
-Be LIBERAL about marking is_clear=true. Only ask questions if truly needed.
-Examples of clear enough: "write sorting function", "make a calculator", "REST API for users"
-Examples that need clarification: "write code" (no task), "fix this" (no code provided)"""
+Requirements:
+- Add proper error handling
+- Include type hints/annotations
+- Add docstrings/comments
+- Follow best practices
+- Make it production-ready
+- Handle edge cases
 
-        try:
-            response = requests.post(
-                f"{self.ollama_host}/api/chat",
-                json={
-                    "model": self.model,
-                    "messages": [{"role": "user", "content": analysis_prompt}],
-                    "stream": False,
-                    "options": {"temperature": 0.1, "num_predict": 1024}
-                },
-                timeout=120
-            )
+Write clean, efficient, well-documented code."""
 
-            if response.status_code != 200:
-                return self._default_analysis(prompt, language)
-
-            raw = response.json()['message']['content'].strip()
-
-            # Extract JSON
-            if "```json" in raw:
-                raw = raw.split("```json")[1].split("```")[0].strip()
-            elif "```" in raw:
-                raw = raw.split("```")[1].split("```")[0].strip()
-
-            start = raw.find('{')
-            end   = raw.rfind('}') + 1
-            if start != -1 and end > start:
-                raw = raw[start:end]
-
-            result = json.loads(raw)
-
-            # Ensure all required fields exist
-            result.setdefault("is_clear",         True)
-            result.setdefault("confidence",        0.8)
-            result.setdefault("inferred_language", language or "python")
-            result.setdefault("enriched_prompt",   prompt)
-            result.setdefault("missing_info",      [])
-            result.setdefault("questions",         [])
-            result.setdefault("requirements",      [])
-
-            # Override language if user explicitly provided one
-            if language:
-                result["inferred_language"] = language
-
-            return result
-
-        except Exception as e:
-            logger.error("analysis_failed", error=str(e))
-            return self._default_analysis(prompt, language)
-
-    def _default_analysis(self, prompt: str, language: str | None) -> dict:
-        """Fallback when LLM fails - assume clear, use python"""
-        return {
-            "is_clear":         True,
-            "confidence":       0.7,
-            "inferred_language": language or "python",
-            "enriched_prompt":  prompt,
-            "missing_info":     [],
-            "questions":        [],
-            "requirements":     []
-        }
-
-    # ------------------------------------------------------------------ #
-    #  Message handler
-    # ------------------------------------------------------------------ #
     def callback(self, ch, method, properties, body):
         try:
             message    = json.loads(body)
             request_id = message['request_id']
-            prompt     = message['prompt']
-            # Language from user (may be None or default)
+            user_input = message['prompt']
             user_lang  = message.get('language')
-            # Treat "python" as unspecified if not in original prompt
-            # (coordinator defaults to python, but user may not have said it)
-            explicit_lang = message.get('explicit_language', False)
-            language = user_lang if explicit_lang else self.detect_language_from_prompt(prompt)
 
-            logger.info("analyzing_prompt", request_id=request_id,
-                        prompt_preview=prompt[:80])
+            logger.info("analyzing_input", request_id=request_id, preview=user_input[:100])
 
             raw   = self.redis.get(f"workflow:{request_id}")
             state = json.loads(raw) if raw else {}
 
-            # Check if user already answered clarification questions
-            user_answers = message.get('user_answers', {})
-
-            analysis = self.analyze_prompt(prompt, language)
+            # Smart analysis
+            intent   = self.extract_user_intent(user_input)
+            language = user_lang if user_lang else self.detect_language(user_input)
+            enriched = self.enrich_prompt(intent, language)
 
             logger.info("analysis_complete",
                         request_id=request_id,
-                        is_clear=analysis['is_clear'],
-                        language=analysis['inferred_language'],
-                        confidence=analysis['confidence'])
+                        mode=intent["mode"],
+                        language=language)
 
-            if analysis['is_clear'] or user_answers:
-                # ✅ Enough info — enrich prompt and send to writer
-                final_prompt = analysis['enriched_prompt']
+            # Always send to writer (never ask clarification)
+            state['current_stage']   = 'writer'
+            state['language']        = language
+            state['mode']            = intent["mode"]
+            state['original_input']  = user_input
+            state['enriched_prompt'] = enriched
+            self.redis.setex(f"workflow:{request_id}", 3600, json.dumps(state))
 
-                # If user answered questions, append answers to prompt
-                if user_answers:
-                    answers_text = "\n".join(
-                        [f"- {q}: {a}" for q, a in user_answers.items()]
-                    )
-                    final_prompt = f"{final_prompt}\n\nAdditional clarifications:\n{answers_text}"
-
-                state['current_stage']    = 'writer'
-                state['language']         = analysis['inferred_language']
-                state['original_prompt']  = prompt
-                state['enriched_prompt']  = final_prompt
-                state['requirements']     = analysis.get('requirements', [])
-                self.redis.setex(f"workflow:{request_id}", 3600, json.dumps(state))
-
-                # Merge user requirements with inferred ones
-                all_requirements = list(set(
-                    message.get('requirements', []) +
-                    analysis.get('requirements', [])
-                ))
-
-                self.channel.basic_publish(
-                    exchange='',
-                    routing_key='code_writer',
-                    body=json.dumps({
-                        "request_id":     request_id,
-                        "prompt":         final_prompt,
-                        "language":       analysis['inferred_language'],
-                        "requirements":   all_requirements,
-                        "max_iterations": message.get('max_iterations', 5)
-                    }),
-                    properties=pika.BasicProperties(delivery_mode=2)
-                )
-                logger.info("sent_to_writer",
-                            request_id=request_id,
-                            language=analysis['inferred_language'])
-            else:
-                # ❓ Need clarification — store questions, wait for user
-                state['current_stage'] = 'needs_clarification'
-                state['questions']     = analysis['questions']
-                state['missing_info']  = analysis['missing_info']
-                state['analysis']      = analysis
-                state['original_message'] = message
-                self.redis.setex(f"workflow:{request_id}", 3600, json.dumps(state))
-
-                logger.info("needs_clarification",
-                            request_id=request_id,
-                            questions=analysis['questions'])
+            self.channel.basic_publish(
+                exchange='',
+                routing_key='code_writer',
+                body=json.dumps({
+                    "request_id":     request_id,
+                    "prompt":         enriched,
+                    "language":       language,
+                    "mode":           intent.get("mode", "generate"),
+                    "requirements":   message.get('requirements', []),
+                    "max_iterations": message.get('max_iterations', 5),
+                }),
+                properties=pika.BasicProperties(delivery_mode=2)
+            )
+            
+            logger.info("sent_to_writer", request_id=request_id, language=language, mode=intent["mode"])
 
             ch.basic_ack(delivery_tag=method.delivery_tag)
 
         except Exception as e:
-            logger.error("callback_error", error=str(e))
+            logger.error("callback_error", error=str(e), traceback=True)
             ch.basic_nack(delivery_tag=method.delivery_tag, requeue=False)
 
     def start(self):
-        logger.info("analyzer_agent_starting")
-        reconnect_on_failure(self, PromptAnalyzerAgent.setup_channel)
+        logger.info("smart_analyzer_starting")
+        reconnect_on_failure(self, SmartAnalyzerAgent.setup_channel)
 
 
 if __name__ == "__main__":
-    agent = PromptAnalyzerAgent()
+    agent = SmartAnalyzerAgent()
     agent.start()
