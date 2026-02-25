@@ -4,6 +4,7 @@ import os
 import structlog
 import redis
 import requests
+import re
 from utils import connect_rabbitmq, reconnect_on_failure
 
 structlog.configure(
@@ -20,6 +21,7 @@ RABBITMQ_URL = os.getenv("RABBITMQ_URL")
 REDIS_URL    = os.getenv("REDIS_URL")
 OLLAMA_HOST  = os.getenv("OLLAMA_HOST", "http://host.docker.internal:11434")
 MODEL_NAME   = os.getenv("MODEL_NAME",  "deepseek-coder:6.7b-instruct-q4_K_M")
+GROQ_MODEL   = os.getenv("GROQ_MODEL", "llama-3.3-70b-versatile")
 
 
 class ImproverAgent:
@@ -39,57 +41,104 @@ class ImproverAgent:
         self.channel.basic_consume(queue='improver', on_message_callback=self.callback)
         logger.info("improver_channel_ready")
 
-    def improve_code(self, code: str, language: str, issues: list) -> dict:
-        issues_text = "\n".join([
-            f"- {i.get('description', str(i))}" if isinstance(i, dict) else f"- {i}"
-            for i in issues
-        ]) or "- Improve code quality and fix any potential issues"
+    @staticmethod
+    def remove_repeated_output(code: str) -> str:
+        """Trim accidental duplicated code blocks from model output."""
+        cleaned = code.strip()
+        if len(cleaned) < 120:
+            return cleaned
 
-        prompt = f"""You are an expert {language} programmer. Fix ALL the following issues in the code below.
+        # Fast path: repeated long character prefix.
+        prefix_len = min(180, max(60, len(cleaned) // 4))
+        marker = cleaned[:prefix_len]
+        repeat_at = cleaned.find(marker, prefix_len)
+        if repeat_at > 0:
+            return cleaned[:repeat_at].rstrip()
 
-Issues to fix:
-{issues_text}
+        # Robust path: repeated block starting at a later line.
+        lines = cleaned.splitlines()
+        if len(lines) < 12:
+            return cleaned
 
-Current code:
-```{language}
-{code}
-```
+        first_line = lines[0].strip()
+        for idx in range(8, len(lines)):
+            if lines[idx].strip() != first_line:
+                continue
+            matched = 0
+            while idx + matched < len(lines) and matched < len(lines):
+                if lines[idx + matched] != lines[matched]:
+                    break
+                matched += 1
+            if matched >= 8:
+                return "\n".join(lines[:idx]).rstrip()
 
-IMPORTANT: Respond with ONLY the fixed {language} code. No explanations, no markdown fences, just the raw code."""
+        # Catch repeated code blocks even when the output starts with prose.
+        block_size = 8
+        min_match = 12
+        max_start = min(30, len(lines) - block_size)
+        for start in range(max_start):
+            marker = lines[start:start + block_size]
+            for idx in range(start + block_size, len(lines) - block_size + 1):
+                if lines[idx:idx + block_size] != marker:
+                    continue
+                matched = 0
+                while start + matched < len(lines) and idx + matched < len(lines):
+                    if lines[start + matched] != lines[idx + matched]:
+                        break
+                    matched += 1
+                if matched >= min_match:
+                    return "\n".join(lines[:idx]).rstrip()
+        return cleaned
 
+    def improve_code(self, code: str, language: str, issues: list | None = None) -> str:
+        """Generate code using Groq (free & fast)."""
         try:
-            response = requests.post(
-                f"{self.ollama_host}/api/chat",
-                json={
-                    "model": self.model,
-                    "messages": [{"role": "user", "content": prompt}],
-                    "stream": False,
-                    "options": {"temperature": 0.1, "num_predict": 2048}
-                },
-                timeout=180
+            from groq import Groq
+            
+            client = Groq(api_key=os.getenv("GROQ_API_KEY"))
+            issues = issues or []
+            issue_lines = []
+            for item in issues:
+                if isinstance(item, dict):
+                    issue_lines.append(f"- {item.get('description', str(item))}")
+                else:
+                    issue_lines.append(f"- {item}")
+            issues_text = "\n".join(issue_lines) if issue_lines else "- Improve robustness and readability"
+            prompt = (
+                f"Improve this {language} code.\n\n"
+                f"Issues to fix:\n{issues_text}\n\n"
+                f"Code:\n{code}\n\n"
+                "Return ONLY the improved code, no markdown fences, no explanations."
             )
-
-            if response.status_code != 200:
-                return {"success": False, "error": f"Ollama error: {response.status_code}"}
-
-            improved = response.json()['message']['content'].strip()
-
-            # Strip markdown fences if present
-            if "```" in improved:
-                parts = improved.split("```")
-                if len(parts) >= 2:
-                    improved = parts[1]
-                    if improved.lower().startswith(language.lower()):
-                        improved = improved[len(language):].strip()
-
-            return {"success": True, "code": improved.strip()}
-
-        except requests.exceptions.Timeout:
-            return {"success": False, "error": "Ollama timed out after 180s"}
+            
+            response = client.chat.completions.create(
+                model=GROQ_MODEL,
+                messages=[
+                    {
+                        "role": "system",
+                        "content": f"You are an expert {language} programmer. Write clean, efficient, production-ready code. Return ONLY code, no markdown fences, no explanations."
+                    },
+                    {
+                        "role": "user",
+                        "content": prompt
+                    }
+                ],
+                temperature=0.1,
+                max_tokens=2000,
+            )
+            
+            code = response.choices[0].message.content.strip()
+            
+            # Remove markdown fences if present
+            if code.startswith("```"):
+                code = re.sub(r"^```[\w]*\n", "", code)
+                code = re.sub(r"\n```$", "", code)
+            code = self.remove_repeated_output(code)
+            return code.strip()
+            
         except Exception as e:
-            logger.error("improve_exception", error=str(e))
-            return {"success": False, "error": str(e)}
-
+            logger.error("groq_generation_failed", error=str(e))
+            raise
     def callback(self, ch, method, properties, body):
         try:
             message    = json.loads(body)
@@ -112,42 +161,43 @@ IMPORTANT: Respond with ONLY the fixed {language} code. No explanations, no mark
             logger.info("improving_code",
                         request_id=request_id, iteration=current_iter)
 
-            result = self.improve_code(
+            improved_code = self.improve_code(
                 code=message['code'],
                 language=message.get('language', 'python'),
                 issues=message.get('issues', [])
             )
 
-            if result['success']:
-                state['code']          = result['code']
-                state['current_stage'] = 'verifier'
-                state['iterations']    = current_iter + 1
-                self.redis.setex(f"workflow:{request_id}", 3600, json.dumps(state))
+            state['code']          = improved_code
+            state['current_stage'] = 'verifier'
+            state['iterations']    = current_iter + 1
+            self.redis.setex(f"workflow:{request_id}", 3600, json.dumps(state))
 
-                ch.basic_publish(
-                    exchange='',
-                    routing_key='verifier',
-                    body=json.dumps({
-                        "request_id":     request_id,
-                        "code":           result['code'],
-                        "language":       message.get('language', 'python'),
-                        "max_iterations": max_iter
-                    }),
-                    properties=pika.BasicProperties(delivery_mode=2)
-                )
-                logger.info("improved_sent_to_verifier",
-                            request_id=request_id, iteration=current_iter + 1)
-            else:
-                state['current_stage'] = 'failed'
-                state['errors'] = state.get('errors', []) + [result['error']]
-                self.redis.setex(f"workflow:{request_id}", 3600, json.dumps(state))
-                logger.error("improvement_failed",
-                             request_id=request_id, error=result['error'])
+            ch.basic_publish(
+                exchange='',
+                routing_key='verifier',
+                body=json.dumps({
+                    "request_id":     request_id,
+                    "code":           improved_code,
+                    "language":       message.get('language', 'python'),
+                    "max_iterations": max_iter
+                }),
+                properties=pika.BasicProperties(delivery_mode=2)
+            )
+            logger.info("improved_sent_to_verifier",
+                        request_id=request_id, iteration=current_iter + 1)
 
             ch.basic_ack(delivery_tag=method.delivery_tag)
 
         except Exception as e:
             logger.error("callback_error", error=str(e))
+            try:
+                raw   = self.redis.get(f"workflow:{request_id}")
+                state = json.loads(raw) if raw else {}
+                state['current_stage'] = 'failed'
+                state['errors'] = state.get('errors', []) + [f"Improver error: {str(e)}"]
+                self.redis.setex(f"workflow:{request_id}", 3600, json.dumps(state))
+            except Exception:
+                pass
             ch.basic_nack(delivery_tag=method.delivery_tag, requeue=False)
 
     def start(self):

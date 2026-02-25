@@ -63,6 +63,7 @@ services:
       dockerfile: Dockerfile
     container_name: codegen-agent-analyzer
     environment:
+      - GROQ_API_KEY=${GROQ_API_KEY}
       - RABBITMQ_URL=amqp://codegen:${RABBITMQ_PASSWORD}@rabbitmq:5672/
       - REDIS_URL=redis://:${REDIS_PASSWORD}@redis:6379/0
       - OLLAMA_HOST=http://host.docker.internal:11434
@@ -86,11 +87,14 @@ services:
       context: ./agents/writer
       dockerfile: Dockerfile
     container_name: codegen-agent-writer
-    environment:
+    environment:	
+      - GROQ_API_KEY=${GROQ_API_KEY}
       - RABBITMQ_URL=amqp://codegen:${RABBITMQ_PASSWORD}@rabbitmq:5672/
       - REDIS_URL=redis://:${REDIS_PASSWORD}@redis:6379/0
       - OLLAMA_HOST=http://host.docker.internal:11434
       - MODEL_NAME=deepseek-coder:1.3b-instruct
+      - GROQ_MODEL=${GROQ_MODEL}
+
     depends_on:
       - rabbitmq
       - redis
@@ -111,10 +115,13 @@ services:
       dockerfile: Dockerfile
     container_name: codegen-agent-verifier
     environment:
+      - GROQ_API_KEY=${GROQ_API_KEY}
       - RABBITMQ_URL=amqp://codegen:${RABBITMQ_PASSWORD}@rabbitmq:5672/
       - REDIS_URL=redis://:${REDIS_PASSWORD}@redis:6379/0
       - OLLAMA_HOST=http://host.docker.internal:11434
       - MODEL_NAME=deepseek-coder:1.3b-instruct
+      - GROQ_MODEL=${GROQ_MODEL}
+
     depends_on:
       - rabbitmq
       - redis
@@ -135,6 +142,7 @@ services:
       dockerfile: Dockerfile
     container_name: codegen-agent-tester
     environment:
+      - GROQ_API_KEY=${GROQ_API_KEY}
       - RABBITMQ_URL=amqp://codegen:${RABBITMQ_PASSWORD}@rabbitmq:5672/
       - REDIS_URL=redis://:${REDIS_PASSWORD}@redis:6379/0
       - OLLAMA_HOST=http://host.docker.internal:11434
@@ -159,10 +167,14 @@ services:
       dockerfile: Dockerfile
     container_name: codegen-agent-improver
     environment:
+      - GROQ_API_KEY=${GROQ_API_KEY}
       - RABBITMQ_URL=amqp://codegen:${RABBITMQ_PASSWORD}@rabbitmq:5672/
       - REDIS_URL=redis://:${REDIS_PASSWORD}@redis:6379/0
       - OLLAMA_HOST=http://host.docker.internal:11434
       - MODEL_NAME=deepseek-coder:1.3b-instruct
+      - GROQ_MODEL=${GROQ_MODEL}
+
+
     depends_on:
       - rabbitmq
       - redis
