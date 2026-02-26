@@ -10,6 +10,7 @@ import uuid
 import time
 import os
 from datetime import datetime
+from sanitizer import sanitize_generated_code
 
 structlog.configure(
     processors=[
@@ -131,55 +132,6 @@ def detect_explicit_language(prompt: str, language: Optional[str]) -> tuple[Opti
     return language, bool(language)
 
 
-def remove_repeated_output(code: Optional[str]) -> Optional[str]:
-    """Trim accidental duplicated code blocks from model output."""
-    if not code:
-        return code
-
-    cleaned = code.strip()
-    if len(cleaned) < 120:
-        return cleaned
-
-    prefix_len = min(180, max(60, len(cleaned) // 4))
-    marker = cleaned[:prefix_len]
-    repeat_at = cleaned.find(marker, prefix_len)
-    if repeat_at > 0:
-        return cleaned[:repeat_at].rstrip()
-
-    lines = cleaned.splitlines()
-    if len(lines) < 12:
-        return cleaned
-
-    first_line = lines[0].strip()
-    for idx in range(8, len(lines)):
-        if lines[idx].strip() != first_line:
-            continue
-        matched = 0
-        while idx + matched < len(lines) and matched < len(lines):
-            if lines[idx + matched] != lines[matched]:
-                break
-            matched += 1
-        if matched >= 8:
-            return "\n".join(lines[:idx]).rstrip()
-
-    # Catch repeated code blocks even when the output starts with prose.
-    block_size = 8
-    min_match = 12
-    max_start = min(30, len(lines) - block_size)
-    for start in range(max_start):
-        marker = lines[start:start + block_size]
-        for idx in range(start + block_size, len(lines) - block_size + 1):
-            if lines[idx:idx + block_size] != marker:
-                continue
-            matched = 0
-            while start + matched < len(lines) and idx + matched < len(lines):
-                if lines[start + matched] != lines[idx + matched]:
-                    break
-                matched += 1
-            if matched >= min_match:
-                return "\n".join(lines[:idx]).rstrip()
-    return cleaned
-
 # ------------------------------------------------------------------ #
 #  Endpoints
 # ------------------------------------------------------------------ #
@@ -299,7 +251,7 @@ async def get_status(request_id: str):
 
     state = json.loads(raw)
     stage = state['current_stage']
-    code = remove_repeated_output(state.get('code'))
+    code = sanitize_generated_code(state.get('code'), language=state.get('language') or "python")
     if code != state.get('code'):
         state['code'] = code
         await redis_client.setex(f"workflow:{request_id}", 3600, json.dumps(state))

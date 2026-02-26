@@ -5,6 +5,7 @@ import re
 import structlog
 import redis
 from utils import connect_rabbitmq, reconnect_on_failure
+from sanitizer import sanitize_generated_code
 
 structlog.configure(
     processors=[
@@ -38,55 +39,6 @@ class CodeWriterAgent:
         self.channel.basic_consume(queue='code_writer', on_message_callback=self.callback)
         logger.info("code_writer_channel_ready")
 
-    @staticmethod
-    def remove_repeated_output(code: str) -> str:
-        """Trim accidental duplicated code blocks from model output."""
-        cleaned = code.strip()
-        if len(cleaned) < 120:
-            return cleaned
-
-        # Fast path: repeated long character prefix.
-        prefix_len = min(180, max(60, len(cleaned) // 4))
-        marker = cleaned[:prefix_len]
-        repeat_at = cleaned.find(marker, prefix_len)
-        if repeat_at > 0:
-            return cleaned[:repeat_at].rstrip()
-
-        # Robust path: repeated block starting at a later line.
-        lines = cleaned.splitlines()
-        if len(lines) < 12:
-            return cleaned
-
-        first_line = lines[0].strip()
-        for idx in range(8, len(lines)):
-            if lines[idx].strip() != first_line:
-                continue
-            matched = 0
-            while idx + matched < len(lines) and matched < len(lines):
-                if lines[idx + matched] != lines[matched]:
-                    break
-                matched += 1
-            if matched >= 8:
-                return "\n".join(lines[:idx]).rstrip()
-
-        # Catch repeated code blocks even when the output starts with prose.
-        block_size = 8
-        min_match = 12
-        max_start = min(30, len(lines) - block_size)
-        for start in range(max_start):
-            marker = lines[start:start + block_size]
-            for idx in range(start + block_size, len(lines) - block_size + 1):
-                if lines[idx:idx + block_size] != marker:
-                    continue
-                matched = 0
-                while start + matched < len(lines) and idx + matched < len(lines):
-                    if lines[start + matched] != lines[idx + matched]:
-                        break
-                    matched += 1
-                if matched >= min_match:
-                    return "\n".join(lines[:idx]).rstrip()
-        return cleaned
-
     def generate_code(self, prompt: str, language: str) -> str:
         """Generate code using Groq API."""
         try:
@@ -102,7 +54,13 @@ class CodeWriterAgent:
                 messages=[
                     {
                         "role": "system",
-                        "content": f"You are an expert {language} programmer. Write clean, efficient, production-ready code. Return ONLY the code, no markdown fences, no explanations."
+                        "content": (
+                            f"You are an expert {language} programmer. "
+                            "Write clean, efficient, production-ready code. "
+                            "Return ONLY the code, no markdown fences, no explanations. "
+                            "Never repeat blocks. For Python, include at most one "
+                            "if __name__ == \"__main__\": block."
+                        )
                     },
                     {
                         "role": "user",
@@ -119,7 +77,7 @@ class CodeWriterAgent:
             if code.startswith("```"):
                 code = re.sub(r"^```[\w]*\n", "", code)
                 code = re.sub(r"\n```$", "", code)
-            code = self.remove_repeated_output(code)
+            code = sanitize_generated_code(code, language=language) or ""
             logger.info("code_generated_via_groq", length=len(code))
             return code.strip()
             
