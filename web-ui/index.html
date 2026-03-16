@@ -1,0 +1,456 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>AI Code Generator</title>
+    <style>
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            min-height: 100vh;
+            padding: 20px;
+        }
+        
+        .container {
+            max-width: 900px;
+            margin: 0 auto;
+        }
+        
+        .header {
+            text-align: center;
+            color: white;
+            margin-bottom: 30px;
+        }
+        
+        .header h1 {
+            font-size: 2.5rem;
+            margin-bottom: 10px;
+            text-shadow: 2px 2px 4px rgba(0,0,0,0.2);
+        }
+        
+        .header p {
+            font-size: 1.1rem;
+            opacity: 0.9;
+        }
+        
+        .card {
+            background: white;
+            border-radius: 16px;
+            padding: 30px;
+            box-shadow: 0 20px 60px rgba(0,0,0,0.3);
+            margin-bottom: 20px;
+        }
+        
+        .input-group {
+            margin-bottom: 20px;
+        }
+        
+        label {
+            display: block;
+            font-weight: 600;
+            margin-bottom: 8px;
+            color: #333;
+        }
+        
+        textarea {
+            width: 100%;
+            padding: 15px;
+            border: 2px solid #e0e0e0;
+            border-radius: 8px;
+            font-size: 16px;
+            font-family: inherit;
+            resize: vertical;
+            transition: border-color 0.3s;
+        }
+        
+        textarea:focus {
+            outline: none;
+            border-color: #667eea;
+        }
+        
+        .options {
+            display: grid;
+            grid-template-columns: 1fr 1fr;
+            gap: 15px;
+            margin-bottom: 20px;
+        }
+        
+        select, input[type="number"] {
+            width: 100%;
+            padding: 12px;
+            border: 2px solid #e0e0e0;
+            border-radius: 8px;
+            font-size: 16px;
+            background: white;
+        }
+        
+        .btn {
+            width: 100%;
+            padding: 15px;
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            color: white;
+            border: none;
+            border-radius: 8px;
+            font-size: 18px;
+            font-weight: 600;
+            cursor: pointer;
+            transition: transform 0.2s, box-shadow 0.2s;
+        }
+        
+        .btn:hover:not(:disabled) {
+            transform: translateY(-2px);
+            box-shadow: 0 10px 20px rgba(102, 126, 234, 0.4);
+        }
+        
+        .btn:disabled {
+            opacity: 0.6;
+            cursor: not-allowed;
+        }
+        
+        .status {
+            display: none;
+            padding: 15px;
+            border-radius: 8px;
+            margin-bottom: 20px;
+            font-weight: 500;
+        }
+        
+        .status.show { display: block; }
+        
+        .status.processing {
+            background: #fff3cd;
+            color: #856404;
+            border: 1px solid #ffeaa7;
+        }
+        
+        .status.success {
+            background: #d4edda;
+            color: #155724;
+            border: 1px solid #c3e6cb;
+        }
+        
+        .status.error {
+            background: #f8d7da;
+            color: #721c24;
+            border: 1px solid #f5c6cb;
+        }
+        
+        .progress {
+            display: none;
+            margin-top: 15px;
+        }
+        
+        .progress.show { display: block; }
+        
+        .progress-bar {
+            width: 100%;
+            height: 8px;
+            background: #e0e0e0;
+            border-radius: 4px;
+            overflow: hidden;
+        }
+        
+        .progress-fill {
+            height: 100%;
+            background: linear-gradient(90deg, #667eea, #764ba2);
+            border-radius: 4px;
+            animation: pulse 2s ease-in-out infinite;
+        }
+        
+        @keyframes pulse {
+            0%, 100% { opacity: 1; }
+            50% { opacity: 0.5; }
+        }
+        
+        .output {
+            display: none;
+        }
+        
+        .output.show { display: block; }
+        
+        .code-header {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            margin-bottom: 10px;
+        }
+        
+        .code-header h3 {
+            color: #333;
+        }
+        
+        .copy-btn {
+            padding: 8px 16px;
+            background: #28a745;
+            color: white;
+            border: none;
+            border-radius: 6px;
+            cursor: pointer;
+            font-size: 14px;
+            transition: background 0.2s;
+        }
+        
+        .copy-btn:hover {
+            background: #218838;
+        }
+        
+        .copy-btn.copied {
+            background: #6c757d;
+        }
+        
+        pre {
+            background: #1e1e1e;
+            color: #d4d4d4;
+            padding: 20px;
+            border-radius: 8px;
+            overflow-x: auto;
+            font-family: 'Consolas', 'Monaco', monospace;
+            font-size: 14px;
+            line-height: 1.5;
+        }
+        
+        .meta {
+            display: grid;
+            grid-template-columns: repeat(3, 1fr);
+            gap: 15px;
+            margin-top: 15px;
+        }
+        
+        .meta-item {
+            text-align: center;
+            padding: 12px;
+            background: #f8f9fa;
+            border-radius: 8px;
+        }
+        
+        .meta-label {
+            font-size: 12px;
+            color: #666;
+            text-transform: uppercase;
+            margin-bottom: 5px;
+        }
+        
+        .meta-value {
+            font-size: 18px;
+            font-weight: 600;
+            color: #667eea;
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <div class="header">
+            <h1>🤖 AI Code Generator</h1>
+            <p>Natural language → Production-ready code in seconds</p>
+        </div>
+        
+        <div class="card">
+            <div class="input-group">
+                <label for="prompt">What do you want to build?</label>
+                <textarea 
+                    id="prompt" 
+                    rows="4" 
+                    placeholder="Examples:
+- fibonacci with memoization
+- REST API for user authentication
+- read CSV and calculate statistics
+- improve this code: [paste code here]"
+                ></textarea>
+            </div>
+            
+            <div class="options">
+                <div class="input-group">
+                    <label for="language">Language (optional)</label>
+                    <select id="language">
+                        <option value="">Auto-detect</option>
+                        <option value="python">Python</option>
+                        <option value="javascript">JavaScript</option>
+                        <option value="typescript">TypeScript</option>
+                        <option value="java">Java</option>
+                        <option value="go">Go</option>
+                        <option value="rust">Rust</option>
+                        <option value="cpp">C++</option>
+                        <option value="csharp">C#</option>
+                    </select>
+                </div>
+                
+                <div class="input-group">
+                    <label for="iterations">Max Iterations</label>
+                    <input type="number" id="iterations" value="5" min="1" max="10">
+                </div>
+            </div>
+            
+            <button class="btn" onclick="generateCode()">
+                ✨ Generate Code
+            </button>
+            
+            <div id="status" class="status"></div>
+            
+            <div id="progress" class="progress">
+                <div class="progress-bar">
+                    <div class="progress-fill"></div>
+                </div>
+                <p id="progress-text" style="text-align: center; margin-top: 10px; color: #666;"></p>
+            </div>
+        </div>
+        
+        <div id="output" class="card output">
+            <div class="code-header">
+                <h3>Generated Code</h3>
+                <button class="copy-btn" onclick="copyCode()">📋 Copy</button>
+            </div>
+            <pre><code id="code-output"></code></pre>
+            
+            <div class="meta">
+                <div class="meta-item">
+                    <div class="meta-label">Language</div>
+                    <div class="meta-value" id="meta-language">-</div>
+                </div>
+                <div class="meta-item">
+                    <div class="meta-label">Iterations</div>
+                    <div class="meta-value" id="meta-iterations">-</div>
+                </div>
+                <div class="meta-item">
+                    <div class="meta-label">Time</div>
+                    <div class="meta-value" id="meta-time">-</div>
+                </div>
+            </div>
+        </div>
+    </div>
+    
+    <script>
+        const API_URL = 'http://localhost:8000';
+        let currentRequestId = null;
+        let startTime = null;
+        
+        async function generateCode() {
+            const prompt = document.getElementById('prompt').value.trim();
+            if (!prompt) {
+                showStatus('Please enter a prompt', 'error');
+                return;
+            }
+            
+            const language = document.getElementById('language').value;
+            const maxIterations = parseInt(document.getElementById('iterations').value);
+            
+            // Reset UI
+            document.getElementById('output').classList.remove('show');
+            document.querySelector('.btn').disabled = true;
+            showProgress('Analyzing your request...');
+            startTime = Date.now();
+            
+            try {
+                // Submit request
+                const response = await fetch(`${API_URL}/generate`, {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({
+                        prompt,
+                        language: language || undefined,
+                        max_iterations: maxIterations
+                    })
+                });
+                
+                const data = await response.json();
+                currentRequestId = data.request_id;
+                
+                showStatus('Code generation started...', 'processing');
+                
+                // Poll for results
+                pollStatus();
+                
+            } catch (error) {
+                showStatus('Error: ' + error.message, 'error');
+                hideProgress();
+                document.querySelector('.btn').disabled = false;
+            }
+        }
+        
+        async function pollStatus() {
+            try {
+                const response = await fetch(`${API_URL}/status/${currentRequestId}`);
+                const data = await response.json();
+                
+                if (data.status === 'completed') {
+                    const elapsed = ((Date.now() - startTime) / 1000).toFixed(1);
+                    showStatus('✅ Code generated successfully!', 'success');
+                    hideProgress();
+                    displayCode(data, elapsed);
+                    document.querySelector('.btn').disabled = false;
+                    
+                } else if (data.status === 'failed') {
+                    showStatus('❌ Generation failed: ' + (data.errors || 'Unknown error'), 'error');
+                    hideProgress();
+                    document.querySelector('.btn').disabled = false;
+                    
+                } else if (data.status === 'needs_clarification') {
+                    showStatus('⚠️ Needs clarification: ' + data.questions.join(', '), 'error');
+                    hideProgress();
+                    document.querySelector('.btn').disabled = false;
+                    
+                } else {
+                    // Still processing
+                    const stage = data.status || 'processing';
+                    updateProgress(`${stage}... (iteration ${data.iterations || 0})`);
+                    setTimeout(pollStatus, 2000); // Poll every 2 seconds
+                }
+                
+            } catch (error) {
+                showStatus('Error polling status: ' + error.message, 'error');
+                hideProgress();
+                document.querySelector('.btn').disabled = false;
+            }
+        }
+        
+        function displayCode(data, elapsed) {
+            document.getElementById('code-output').textContent = data.code;
+            document.getElementById('meta-language').textContent = data.language || 'auto';
+            document.getElementById('meta-iterations').textContent = data.iterations || 1;
+            document.getElementById('meta-time').textContent = elapsed + 's';
+            document.getElementById('output').classList.add('show');
+        }
+        
+        function copyCode() {
+            const code = document.getElementById('code-output').textContent;
+            navigator.clipboard.writeText(code).then(() => {
+                const btn = document.querySelector('.copy-btn');
+                btn.textContent = '✅ Copied!';
+                btn.classList.add('copied');
+                setTimeout(() => {
+                    btn.textContent = '📋 Copy';
+                    btn.classList.remove('copied');
+                }, 2000);
+            });
+        }
+        
+        function showStatus(message, type) {
+            const status = document.getElementById('status');
+            status.textContent = message;
+            status.className = `status ${type} show`;
+        }
+        
+        function showProgress(text) {
+            document.getElementById('progress').classList.add('show');
+            document.getElementById('progress-text').textContent = text;
+        }
+        
+        function updateProgress(text) {
+            document.getElementById('progress-text').textContent = text;
+        }
+        
+        function hideProgress() {
+            document.getElementById('progress').classList.remove('show');
+        }
+        
+        // Allow Enter to submit (Ctrl+Enter)
+        document.getElementById('prompt').addEventListener('keydown', (e) => {
+            if (e.ctrlKey && e.key === 'Enter') {
+                generateCode();
+            }
+        });
+    </script>
+</body>
+</html>
